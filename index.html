@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Your Key</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=Rajdhani:wght@400;600&display=swap" rel="stylesheet">
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { min-height: 100vh; display: flex; justify-content: center; align-items: center; background: #080808; font-family: 'Rajdhani', sans-serif; color: #fff; overflow: hidden; }
+  body::before { content: ''; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 600px; height: 600px; background: radial-gradient(ellipse, rgba(232, 201, 106, 0.06) 0%, transparent 70%); pointer-events: none; animation: ambientPulse 4s ease-in-out infinite; }
+  @keyframes ambientPulse { 0%, 100% { opacity: 0.6; transform: translate(-50%, -50%) scale(1); } 50% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); } }
+  .card { position: relative; background: linear-gradient(145deg, #141414, #0e0e0e); padding: 40px 36px; border-radius: 16px; width: 340px; text-align: center; border: 1px solid rgba(232, 201, 106, 0.15); box-shadow: 0 20px 60px rgba(0,0,0,0.6); animation: cardReveal 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  @keyframes cardReveal { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+  .icon { font-size: 28px; margin-bottom: 12px; filter: drop-shadow(0 0 12px rgba(232, 201, 106, 0.6)); animation: iconFloat 3s ease-in-out infinite; }
+  @keyframes iconFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  h2 { font-family: 'Cinzel', serif; font-size: 18px; letter-spacing: 4px; text-transform: uppercase; color: #e8c96a; margin-bottom: 6px; }
+  .divider { height: 1px; background: linear-gradient(90deg, transparent, rgba(232, 201, 106, 0.3), transparent); margin: 20px 0; }
+  .input-wrapper { position: relative; margin-bottom: 16px; border-radius: 8px; overflow: hidden; border: 1px solid rgba(232, 201, 106, 0.3); }
+  input { width: 100%; padding: 13px 16px; background: #0d0d0d; border: none; color: #e8c96a; font-family: 'Rajdhani', monospace; font-size: 15px; text-align: center; outline: none; }
+  button { width: 100%; padding: 13px; background: linear-gradient(135deg, #c9a83a, #e8c96a); border: none; border-radius: 8px; color: #0a0a0a; cursor: pointer; font-family: 'Cinzel', serif; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; transition: 0.3s; }
+  button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(232, 201, 106, 0.4); }
+  .status { display: none; margin-top: 14px; color: #e8c96a; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; }
+  .status.show { display: block; }
+</style>
+</head>
+<body>
+
+<div class="card">
+    <div class="icon">🗝️</div>
+    <h2>Your Key</h2>
+    <div class="divider"></div>
+    <div class="input-wrapper">
+      <input id="keyBox" value="Loading..." readonly>
+    </div>
+    <button onclick="copyKey()">⬡ Copy Key</button>
+    <div class="status" id="status">✦ Copied to Clipboard</div>
+</div>
+
+<script>
+  // BAGIAN PENTING: Mengambil key dari Cloudflare Function (/key)
+  fetch("/key")
+    .then(res => res.text())
+    .then(data => {
+      document.getElementById("keyBox").value = data.trim();
+    })
+    .catch(() => {
+      document.getElementById("keyBox").value = "ERROR";
+    });
+
+  function copyKey() {
+    const box = document.getElementById("keyBox");
+    const status = document.getElementById("status");
+    box.select();
+    document.execCommand("copy");
+    status.classList.add("show");
+    setTimeout(() => status.classList.remove("show"), 2000);
+  }
+</script>
+</body>
+</html>
