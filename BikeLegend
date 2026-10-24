@@ -1,0 +1,439 @@
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
+local player = Players.LocalPlayer
+
+local SpawnBikeEvent = ReplicatedStorage:WaitForChild("SpawnBikeEvent")
+
+---------------------------------------------------------------- Pengaturan
+local WAYPOINTS = {
+	CFrame.new(7059.94824, 3.89999986, 1303.37634, -0.00769084319, 5.75874282e-08, 0.999970436, -1.46509196e-08, 1, -5.77018149e-08, -0.999970436, -1.50942618e-08, -0.00769084319),
+	CFrame.new(-8274.95117, 3.89999986, 1379.8606, -0.52347821, 1.80472579e-08, 0.852039039, -4.74438302e-08, 1, -5.0329934e-08, -0.852039039, -6.67706246e-08, -0.52347821),
+}
+
+local FRONT_Z = -1          -- ganti ke 1 kalau motor menghadap terbalik
+local SPEED_KMH = 70        -- diatur lewat slider (km/h)
+local KMH_TO_STUDS = 1 / 3.6 / 0.28  -- 1 stud = 0.28 meter (ubah kalau speedometer game beda)
+local BRAKE_RATE = 1.6      -- makin besar makin cepat berhenti
+local STOP_DIST = 2
+local Y_SMOOTH = 0.3
+local SPAWN_DELAY = 3
+local PROMPT_DELAY = 1
+
+local bikeOn = false
+local bikeStarted = false   -- true setelah reset karakter selesai
+local bikeReady = false     -- true setelah bike di-teleport ke titik 1
+local bikeSession = 0
+local pumpkinOn = false
+local antiAfkOn = false
+local braking = false       -- true saat motor sedang direm pelan-pelan
+local idleReleased = false  -- true = pumpkin habis, motor sudah dilepas (bisa dikendarai manual)
+local loopsRunning = false
+local loopId = 0
+local wpIndex = 1
+local heightOffset = nil
+local collideBackup = {}
+
+---------------------------------------------------------------- Helper
+local function getSeat()
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local seat = hum and hum.SeatPart
+	if seat and seat:IsA("VehicleSeat") then return seat end
+end
+
+local function posOf(obj)
+	local ok, cf = pcall(function() return obj:GetPivot() end)
+	return ok and cf.Position or nil
+end
+
+local function nearestPumpkin(from)
+	local folder = workspace:FindFirstChild("MyPumpkins")
+	if not folder then return nil end
+	local best, bestD
+	for _, p in ipairs(folder:GetChildren()) do
+		local pos = posOf(p)
+		if pos then
+			local d = (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(from.X, 0, from.Z)).Magnitude
+			if not bestD or d < bestD then best, bestD = pos, d end
+		end
+	end
+	return best, bestD
+end
+
+local function groundY(bike, pos)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {bike, player.Character, workspace:FindFirstChild("MyPumpkins")}
+	local hit = workspace:Raycast(pos + Vector3.new(0, 1, 0), Vector3.new(0, -400, 0), params)
+	return hit and hit.Position.Y or nil
+end
+
+local function restoreCollide()
+	for part, v in pairs(collideBackup) do
+		if part and part.Parent then part.CanCollide = v end
+	end
+	collideBackup = {}
+	heightOffset = nil
+end
+
+local function noclip(model)
+	if not model then return end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") and d.CanCollide then
+			if collideBackup[d] == nil then collideBackup[d] = true end
+			d.CanCollide = false
+		end
+	end
+end
+
+-- perlambatan halus (seperti direm)
+local function decelerate(root, dt)
+	local v = root.AssemblyLinearVelocity
+	local k = math.exp(-BRAKE_RATE * dt)
+	local nv = Vector3.new(v.X * k, 0, v.Z * k)
+	if nv.Magnitude < 1 then nv = Vector3.zero end
+	root.AssemblyLinearVelocity = nv
+	root.AssemblyAngularVelocity = Vector3.zero
+	return nv.Magnitude
+end
+
+local function wantLoops()
+	return pumpkinOn or (bikeOn and bikeStarted)
+end
+
+local function isActive()
+	return wantLoops() or braking
+end
+
+-- noclip hanya saat script benar-benar mengendalikan motor
+local function noclipWanted()
+	if braking then return true end
+	if bikeOn and bikeStarted then return true end
+	return pumpkinOn and not idleReleased
+end
+
+local function startBrake()
+	if wantLoops() then return end
+	if getSeat() then braking = true end
+end
+
+---------------------------------------------------------------- Tembus tiap frame (hanya saat naik motor)
+RunService.Stepped:Connect(function()
+	if not isActive() then return end
+	if not noclipWanted() then return end
+	local seat = getSeat()
+	if not seat then
+		if next(collideBackup) then restoreCollide() end
+		return
+	end
+	noclip(seat.Parent)
+	noclip(player.Character)
+end)
+
+---------------------------------------------------------------- Gerak otomatis
+RunService.Heartbeat:Connect(function(dt)
+	if not isActive() then return end
+
+	local seat = getSeat()
+	if braking and not seat then
+		braking = false
+		restoreCollide()
+		return
+	end
+	local bike = seat and seat.Parent
+	if not bike then return end
+
+	local root = seat.AssemblyRootPart
+	if not root then return end
+
+	local bikeMode = bikeOn and bikeStarted
+
+	-- Motor sudah dilepas (pumpkin habis): jangan ganggu kontrol manual.
+	-- Cuma cek apakah pumpkin sudah muncul lagi.
+	if not braking and not bikeMode and idleReleased then
+		local t = nearestPumpkin(seat.Position)
+		if not t then return end
+		idleReleased = false
+	end
+
+	local pivot = bike:GetPivot()
+	local pos = pivot.Position
+
+	-- tinggi mengikuti tanah
+	local gy = groundY(bike, pos)
+	local newY = pos.Y
+	if gy then
+		heightOffset = heightOffset or (pos.Y - gy)
+		newY = pos.Y + ((gy + heightOffset) - pos.Y) * Y_SMOOTH
+	end
+
+	-- Mode rem: berhenti pelan-pelan setelah dimatikan
+	if braking then
+		seat.Throttle = 0
+		seat.Steer = 0
+		local sp = decelerate(root, dt)
+		bike:PivotTo(CFrame.new(Vector3.new(pos.X, newY, pos.Z)) * (pivot - pivot.Position))
+		if sp <= 0 then
+			braking = false
+			restoreCollide()
+		end
+		return
+	end
+
+	-- Fase teleport: bike (dan kamu) dipindah ke titik 1, lalu lanjut ke titik 2
+	if bikeMode and not bikeReady then
+		bike:PivotTo(WAYPOINTS[1] + Vector3.new(0, 3, 0))
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		heightOffset = nil
+		wpIndex = 2
+		bikeReady = true
+		return
+	end
+
+	local speedStuds = SPEED_KMH * KMH_TO_STUDS
+
+	-- Tentukan target (Auto Bike diprioritaskan kalau dua-duanya ON)
+	local target
+	local dist
+	if bikeMode then
+		target = WAYPOINTS[wpIndex].Position
+		dist = Vector3.new(target.X - pos.X, 0, target.Z - pos.Z).Magnitude
+		local arriveRadius = math.max(15, speedStuds * 0.06)
+		if dist <= arriveRadius then
+			wpIndex = (wpIndex % #WAYPOINTS) + 1
+			return
+		end
+	else
+		target, dist = nearestPumpkin(seat.Position)
+		if not target then
+			-- tidak ada pumpkin -> rem pelan sampai berhenti, lalu LEPAS (bisa dikendarai manual)
+			seat.Throttle = 0
+			seat.Steer = 0
+			local sp = decelerate(root, dt)
+			bike:PivotTo(CFrame.new(Vector3.new(pos.X, newY, pos.Z)) * (pivot - pivot.Position))
+			if sp <= 0 then
+				idleReleased = true
+				restoreCollide()
+			end
+			return
+		end
+	end
+
+	local dir = Vector3.new(target.X - pos.X, 0, target.Z - pos.Z)
+	if dir.Magnitude < 0.05 then return end
+	dir = dir.Unit
+
+	-- arahkan motor ke target
+	local cf = pivot
+	if bikeMode or dist > STOP_DIST then
+		local desiredLook = dir * (-FRONT_Z)
+		cf = CFrame.lookAt(pos, pos + desiredLook)
+	end
+	bike:PivotTo(CFrame.new(Vector3.new(pos.X, newY, pos.Z)) * (cf - cf.Position))
+
+	-- kecepatan langsung full (tanpa akselerasi)
+	root.AssemblyLinearVelocity = dir * speedStuds
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	seat.Throttle = 1
+	seat.Steer = 0
+end)
+
+---------------------------------------------------------------- Loop spawn motor + naik
+local function startLoops(currentId)
+	task.spawn(function()
+		while loopsRunning and loopId == currentId do
+			if not getSeat() then
+				pcall(function() SpawnBikeEvent:FireServer() end)
+			end
+			task.wait(SPAWN_DELAY)
+		end
+	end)
+
+	task.spawn(function()
+		while loopsRunning and loopId == currentId do
+			if not getSeat() then
+				pcall(function()
+					for _, obj in ipairs(workspace:GetDescendants()) do
+						if obj.Name == "Chassis" then
+							local att = obj:FindFirstChild("PromptAttachment")
+							local prompt = att and att:FindFirstChild("RidePrompt")
+							if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+								fireproximityprompt(prompt)
+							end
+						end
+					end
+				end)
+			end
+			task.wait(PROMPT_DELAY)
+		end
+	end)
+end
+
+local function refresh()
+	if wantLoops() and not loopsRunning then
+		loopId += 1
+		loopsRunning = true
+		startLoops(loopId)
+	elseif not wantLoops() and loopsRunning then
+		loopId += 1
+		loopsRunning = false
+		if not braking then
+			restoreCollide()
+			local seat = getSeat()
+			if seat then
+				seat.Throttle = 0
+				seat.Steer = 0
+			end
+		end
+	end
+end
+
+player.CharacterAdded:Connect(function()
+	braking = false
+	idleReleased = false
+	restoreCollide()
+end)
+
+---------------------------------------------------------------- Reset karakter
+local function resetCharacter(session)
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+	if hum and hum.Health > 0 then
+		hum.Health = 0
+		player.CharacterAdded:Wait()
+	end
+	if bikeSession ~= session then return false end
+
+	local t = 0
+	repeat
+		task.wait(0.2)
+		t += 0.2
+		local c = player.Character
+	until (c and c:FindFirstChild("HumanoidRootPart") and c:FindFirstChildOfClass("Humanoid")) or t >= 10
+
+	task.wait(0.1) -- tunggu karakter benar-benar siap
+	return bikeSession == session
+end
+
+local function startAutoBike()
+	bikeSession += 1
+	local session = bikeSession
+	braking = false
+	idleReleased = false
+	bikeOn = true
+	bikeStarted = false
+	bikeReady = false
+	wpIndex = 1
+
+	task.spawn(function()
+		local ok = resetCharacter(session)
+		if ok and bikeOn and bikeSession == session then
+			bikeStarted = true
+			refresh() -- mulai spawn + naik bike
+		end
+	end)
+end
+
+local function stopAutoBike()
+	local wasMoving = bikeOn and bikeReady
+	bikeSession += 1
+	bikeOn = false
+	bikeStarted = false
+	bikeReady = false
+	if wasMoving then startBrake() end -- rem pelan-pelan
+	refresh()
+end
+
+---------------------------------------------------------------- Anti AFK
+player.Idled:Connect(function()
+	if antiAfkOn then
+		VirtualUser:CaptureController()
+		VirtualUser:ClickButton2(Vector2.new())
+	end
+end)
+
+---------------------------------------------------------------- UI (WindUI)
+local Window = WindUI:CreateWindow({
+	Title = "Geprek",
+	Folder = "myhub",
+	Icon = "solar:folder-2-bold-duotone",
+})
+
+Window:Tag({
+	Title = "V2.7",
+	Icon = "rocket",
+	Color = Color3.fromHex("#FFFF00"),
+	Border = true,
+})
+
+local Tab = Window:Tab({
+	Title = "Home",
+	Icon = "house",
+	Border = true,
+})
+
+Tab:Section({ Title = "Auto Farm" })
+
+Tab:Toggle({
+	Flag = "AutoBike",
+	Title = "Auto Bike",
+	Value = false,
+	Type = "Toggle",
+	Callback = function(state)
+		if state then
+			startAutoBike()
+		else
+			stopAutoBike()
+		end
+	end
+})
+
+Tab:Toggle({
+	Flag = "AutoPumpkins",
+	Title = "Auto Pumpkins",
+	Value = false,
+	Type = "Toggle",
+	Callback = function(state)
+		pumpkinOn = state
+		if state then
+			braking = false
+			idleReleased = false
+		else
+			startBrake() -- rem pelan-pelan lalu lepas
+		end
+		refresh()
+	end
+})
+
+Tab:Slider({
+	Flag = "BikeSpeed",
+	Title = "Bike Speed (km/h)",
+	Step = 1,
+	Value = {
+		Min = 5,
+		Max = 500,
+		Default = 70,
+	},
+	Callback = function(value)
+		SPEED_KMH = value
+	end
+})
+
+Tab:Toggle({
+	Flag = "AntiAFK",
+	Title = "Anti AFK",
+	Value = false,
+	Type = "Toggle",
+	Callback = function(state)
+		antiAfkOn = state
+	end
+})
+
+Window:SelectTab(1)
